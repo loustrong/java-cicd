@@ -1,0 +1,116 @@
+cache:
+  untracked: true
+  paths:
+    - .m2/
+
+stages:
+  - test
+  - setup
+  - build
+  - deploy
+
+scan-and-package:
+  only:
+    - master
+  image: harbor.wistron.com/base_image/maven:3-jdk-8
+  stage: test
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+    MAVEN_OPTS: "-Djava.awt.headless=true -Dmaven.repo.local=.m2/repository"
+    MAVEN_CLI_OPTS: "-s .m2/settings.xml -B "
+  tags:
+    - prd-runner01
+
+  cache:
+    paths:
+      - .m2/repository
+  before_script:
+    - if test "${SOURCEPJ}" != "true"; then echo "Not Source Code Project, exit ci."; exit 0; fi;
+  script:
+    - mvn --version
+    - mvn clean
+    - mvn install $MAVEN_OPTS >> mvn.log
+    - mvn sonar:sonar -Dsonar.projectKey=ccm-backend -Dsonar.host.url=${SONAR_URL} -Dsonar.login=${SONAR_TOKEN}
+    - mvn $MAVEN_CLI_OPTS package
+
+  artifacts:
+    paths:
+      - target/*.jar
+      - mvn.log
+    when: always
+    expire_in: 1 days
+
+get_gitlab_version:
+  only:
+    - master
+    - /^pre-production.*$/
+    - production
+    - forkprd
+    - /^fix-.*$/
+  image: harbor.wistron.com/base_image/alpine:3.10
+  stage: setup
+  tags:
+    - prd-runner01
+  before_script:
+    - apk add curl
+    - apk add jq
+    - . ci-version.sh
+  script:
+    - get_version
+  artifacts:
+    paths:
+      - build-vars.sh
+    when: always
+    expire_in: 1 days
+
+docker-build:
+  only:
+    - master
+    - production
+    - /^pre-production.*$/
+    - /^fix-.*$/
+  image: harbor.wistron.com/base_image/vc-tool:latest
+  stage: build
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+  tags:
+    - prd-runner01
+  before_script:
+    - if test "${SOURCEPJ}" != "true"; then echo "Not Source Code Project, exit ci."; exit 0; fi;
+    - source build-vars.sh
+    - echo ${SYS_VER}
+    - . ci-version.sh
+  script:
+    - docker_build
+  artifacts:
+    paths:
+      - build-vars-docker_build.sh
+    when: always
+    expire_in: 1 days
+
+k8s-deploy:
+  only:
+    - master
+    - /^pre-production.*$/
+    - production
+    - forkprd
+    - /^fix-.*$/
+  tags:
+    - prd-runner01
+  stage: deploy
+  image: harbor.wistron.com/base_image/alpine:3.10
+  before_script:
+    - apk add curl
+    - apk add jq
+    - export CI_JOB_TIMESTAMP=$(date +"%s")
+    - |
+      {
+        source build-vars-docker_build.sh;
+      } || {
+        echo "No need to update."; 
+        exit 0;
+      }
+    - echo ${SYS_VER}
+    - . ci-version.sh
+  script:
+    - cd_update
